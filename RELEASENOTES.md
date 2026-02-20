@@ -1,5 +1,11 @@
 # Release notes
 
+### Unreleased changes
+
+*   Remove deprecated symbols:
+    *   Remove `Mp4Extractor.FLAG_READ_MOTION_PHOTO_METADATA`. Use
+        `HeifExtractor` to extract motion photo metadata from HEIC files
+        instead.
 ## 1.10
 
 ### 1.10.0 (2026-03-25)
