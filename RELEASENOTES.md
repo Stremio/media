@@ -2,6 +2,13 @@
 
 ### Unreleased changes
 
+*   Extractors:
+    *   MP4: Add support for extracting chapter metadata (both Nero and
+        QuickTime formats). QuickTime chapters are preferred if both are
+        present. The extracted chapter information is exposed as `Chapter`
+        entries within the track's `Metadata`, allowing for native chapter
+        navigation in MP4, M4A, and M4B files (such as audiobooks and podcasts)
+        ([#2803](https://github.com/androidx/media/issues/2803)).
 *   Remove deprecated symbols:
     *   Remove `Mp4Extractor.FLAG_READ_MOTION_PHOTO_METADATA`. Use
         `HeifExtractor` to extract motion photo metadata from HEIC files
