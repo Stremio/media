@@ -9,6 +9,8 @@
         entries within the track's `Metadata`, allowing for native chapter
         navigation in MP4, M4A, and M4B files (such as audiobooks and podcasts)
         ([#2803](https://github.com/androidx/media/issues/2803)).
+    *   Matroska: Parse chapter info to `Chapter` entries in a track's
+        `Metadata`.
 *   Remove deprecated symbols:
     *   Remove `Mp4Extractor.FLAG_READ_MOTION_PHOTO_METADATA`. Use
         `HeifExtractor` to extract motion photo metadata from HEIC files
