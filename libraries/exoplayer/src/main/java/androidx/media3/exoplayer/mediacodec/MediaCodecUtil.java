@@ -213,7 +213,11 @@ public final class MediaCodecUtil {
             format.sampleMimeType, requiresSecureDecoder, requiresTunnelingDecoder);
     List<MediaCodecInfo> alternativeDecoderInfos =
         getAlternativeDecoderInfos(
-            mediaCodecSelector, format, requiresSecureDecoder, requiresTunnelingDecoder);
+            mediaCodecSelector,
+            format,
+            requiresSecureDecoder,
+            requiresTunnelingDecoder,
+            /* mapDV7ToHevc= */ false);
     return ImmutableList.<MediaCodecInfo>builder()
         .addAll(decoderInfos)
         .addAll(alternativeDecoderInfos)
@@ -244,7 +248,23 @@ public final class MediaCodecUtil {
       boolean requiresSecureDecoder,
       boolean requiresTunnelingDecoder)
       throws DecoderQueryException {
-    @Nullable String alternativeMimeType = getAlternativeCodecMimeType(format);
+    return getAlternativeDecoderInfos(
+        mediaCodecSelector,
+        format,
+        requiresSecureDecoder,
+        requiresTunnelingDecoder,
+        /* mapDV7ToHevc= */ false);
+  }
+
+  /** Like {@link #getAlternativeDecoderInfos(MediaCodecSelector, Format, boolean, boolean)}. */
+  public static List<MediaCodecInfo> getAlternativeDecoderInfos(
+      MediaCodecSelector mediaCodecSelector,
+      Format format,
+      boolean requiresSecureDecoder,
+      boolean requiresTunnelingDecoder,
+      boolean mapDV7ToHevc)
+      throws DecoderQueryException {
+    @Nullable String alternativeMimeType = getAlternativeCodecMimeType(format, mapDV7ToHevc);
     if (alternativeMimeType == null) {
       return ImmutableList.of();
     }
@@ -375,6 +395,21 @@ public final class MediaCodecUtil {
    */
   @Nullable
   public static String getAlternativeCodecMimeType(Format format) {
+    return getAlternativeCodecMimeType(format, /* mapDV7ToHevc= */ false);
+  }
+
+  /**
+   * Returns an alternative codec MIME type (besides the default {@link Format#sampleMimeType}) that
+   * can be used to decode samples of the provided {@link Format}.
+   *
+   * @param format The media format.
+   * @param mapDV7ToHevc Whether Dolby Vision profile 7 streams may be mapped to HEVC.
+   * @return An alternative MIME type of a codec that be used decode samples of the provided {@code
+   *     Format} (besides the default {@link Format#sampleMimeType}), or null if no such alternative
+   *     exists.
+   */
+  @Nullable
+  public static String getAlternativeCodecMimeType(Format format, boolean mapDV7ToHevc) {
     if (MimeTypes.AUDIO_E_AC3_JOC.equals(format.sampleMimeType)) {
       // E-AC3 decoders can decode JOC streams, but in 2-D rather than 3-D.
       return MimeTypes.AUDIO_E_AC3;
@@ -390,7 +425,8 @@ public final class MediaCodecUtil {
       if (codecProfileAndLevel != null) {
         int profile = codecProfileAndLevel.first;
         if (profile == CodecProfileLevel.DolbyVisionProfileDvheDtr
-            || profile == CodecProfileLevel.DolbyVisionProfileDvheSt) {
+            || profile == CodecProfileLevel.DolbyVisionProfileDvheSt
+            || (mapDV7ToHevc && profile == CodecProfileLevel.DolbyVisionProfileDvheDtb)) {
           return MimeTypes.VIDEO_H265;
         } else if (profile == CodecProfileLevel.DolbyVisionProfileDvavSe) {
           return MimeTypes.VIDEO_H264;
