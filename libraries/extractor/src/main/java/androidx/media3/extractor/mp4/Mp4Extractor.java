@@ -33,9 +33,11 @@ import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
+import androidx.media3.common.Label;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
@@ -45,6 +47,7 @@ import androidx.media3.container.Mp4Box.ContainerBox;
 import androidx.media3.container.NalUnitUtil;
 import androidx.media3.extractor.Ac3Util;
 import androidx.media3.extractor.Ac4Util;
+import androidx.media3.extractor.DtsUtil;
 import androidx.media3.extractor.Extractor;
 import androidx.media3.extractor.ExtractorInput;
 import androidx.media3.extractor.ExtractorOutput;
@@ -105,7 +108,9 @@ public final class Mp4Extractor implements Extractor {
         FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES,
         FLAG_READ_AUXILIARY_TRACKS,
         FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265,
-        FLAG_OMIT_TRACK_SAMPLE_TABLE
+        FLAG_OMIT_TRACK_SAMPLE_TABLE,
+        FLAG_DISABLE_ARTWORK_METADATA,
+        FLAG_DISABLE_HAGC_METADATA
       })
   public @interface Flags {}
 
@@ -168,6 +173,12 @@ public final class Mp4Extractor implements Extractor {
    * retrieval scenarios where individual sample data is not required.
    */
   public static final int FLAG_OMIT_TRACK_SAMPLE_TABLE = 1 << 8;
+
+  /** Flag to disable parsing of artwork metadata. */
+  public static final int FLAG_DISABLE_ARTWORK_METADATA = 1 << 9;
+
+  /** Flag to disable parsing of HAGC (ST 2094-50) metadata. */
+  public static final int FLAG_DISABLE_HAGC_METADATA = 1 << 10;
 
   /** The maximum number of sync samples to scan when searching for a thumbnail. */
   private static final int MAX_SYNC_SAMPLES_TO_SCAN_FOR_THUMBNAIL = 20;
@@ -632,7 +643,9 @@ public final class Mp4Extractor implements Extractor {
     @Nullable Metadata udtaMetadata = null;
     @Nullable Mp4Box.LeafBox udta = moov.getLeafBoxOfType(Mp4Box.TYPE_udta);
     if (udta != null) {
-      udtaMetadata = BoxParser.parseUdta(udta);
+      udtaMetadata =
+          BoxParser.parseUdta(
+              udta, /* ignoreArtwork= */ (flags & FLAG_DISABLE_ARTWORK_METADATA) != 0);
       gaplessInfoHolder.setFromMetadata(udtaMetadata);
     }
 
@@ -649,7 +662,16 @@ public final class Mp4Extractor implements Extractor {
             /* drmInitData= */ null,
             ignoreEditLists,
             isQuickTime,
-            /* modifyTrackFunction= */ track -> track,
+            /* modifyTrackFunction= */ track -> {
+              if (track == null) {
+                return null;
+              }
+              if ((flags & FLAG_DISABLE_HAGC_METADATA) != 0
+                  && CodecSpecificDataUtil.isHagcTrack(track.format)) {
+                return null;
+              }
+              return track;
+            },
             omitTrackSampleTable);
 
     if (readingAuxiliaryTracks) {
@@ -743,10 +765,13 @@ public final class Mp4Extractor implements Extractor {
       // The moov and esds boxes don't contain enough information to distinguish between MPEG
       // audio layers 1, 2 and 3, but the distinction is important to select the right MIME type
       // for MediaCodec decoders (and other decoders that handle the same audio/mpeg-L1 and
-      // audio/mpeg-L2 MIME types). So we store the format with audio/mpeg for now, and then
-      // update the MIME type and pass it to TrackOutput.format(...) based on the layer info in
-      // the first sample.
-      boolean isMpegAudio = Objects.equals(track.format.sampleMimeType, MimeTypes.AUDIO_MPEG);
+      // audio/mpeg-L2 MIME types). DTS has a similar problem where we can't distinguish DTS,
+      // DTS-HD and DTS Express. So we store the format with a placeholder MIME for now, and then
+      // update the MIME type and pass it to TrackOutput.format(...) based on the info in the first
+      // sample.
+      boolean needsSamplesForMimeType =
+          Objects.equals(track.format.sampleMimeType, MimeTypes.AUDIO_MPEG)
+              || DtsUtil.isDtsBaseAudioMimeType(track.format.sampleMimeType);
       boolean needsChapterMetadata = false;
       if (!omitTrackSampleTable && track.chapterTrackId != C.INDEX_UNSET) {
         for (TrackSampleTable chapterSampleTable : chapterSampleTables) {
@@ -756,7 +781,7 @@ public final class Mp4Extractor implements Extractor {
           }
         }
       }
-      if (isMpegAudio || needsChapterMetadata) {
+      if (needsSamplesForMimeType || needsChapterMetadata) {
         mp4Track.pendingFormat = format;
       } else {
         mp4Track.trackOutput.format(format);
@@ -989,6 +1014,7 @@ public final class Mp4Extractor implements Extractor {
         }
       }
     } else {
+      Format pendingFormat = track.pendingFormat;
       if (MimeTypes.AUDIO_AC4.equals(track.track.format.sampleMimeType)) {
         if (sampleBytesWritten == 0) {
           Ac4Util.getAc4SampleHeader(sampleSize, scratch);
@@ -996,9 +1022,8 @@ public final class Mp4Extractor implements Extractor {
           sampleBytesWritten += Ac4Util.SAMPLE_HEADER_SIZE;
         }
         sampleSize += Ac4Util.SAMPLE_HEADER_SIZE;
-      } else if (track.pendingFormat != null
+      } else if (pendingFormat != null
           && Objects.equals(track.track.format.sampleMimeType, MimeTypes.AUDIO_MPEG)) {
-        Format pendingFormat = track.pendingFormat;
         scratch.reset(/* limit= */ 4);
         input.peekFully(scratch.getData(), /* offset= */ 0, /* length= */ 4);
         input.resetPeekPosition();
@@ -1011,6 +1036,11 @@ public final class Mp4Extractor implements Extractor {
                     .setSampleMimeType(checkNotNull(mpegHeader.mimeType))
                     .build()
                 : pendingFormat);
+        track.pendingFormat = null;
+      } else if (pendingFormat != null
+          && DtsUtil.isDtsBaseAudioMimeType(track.track.format.sampleMimeType)) {
+        track.trackOutput.format(
+            DtsUtil.updateFormatWithDtsHdInfo(input, sampleSize, pendingFormat));
         track.pendingFormat = null;
       } else if (trueHdSampleRechunker != null) {
         trueHdSampleRechunker.startSample(input);
@@ -1077,7 +1107,12 @@ public final class Mp4Extractor implements Extractor {
           chapterSampleIndex + 1 < chapterSampleTable.sampleCount
               ? Util.usToMs(chapterSampleTable.timestampsUs[chapterSampleIndex + 1])
               : Util.usToMs(chapterSampleTable.durationUs);
-      quickTimeChapters.add(Chapter.create(startTimeMs, endTimeMs, text));
+      quickTimeChapters.add(
+          new Chapter.Builder()
+              .setStartTimeMs(startTimeMs)
+              .setEndTimeMs(endTimeMs)
+              .setTitle(new Label(/* language= */ null, text))
+              .build());
       chapterSampleIndex++;
       return Extractor.RESULT_CONTINUE;
     }
@@ -1097,10 +1132,11 @@ public final class Mp4Extractor implements Extractor {
             currentFormat.buildUpon().setMetadata(new Metadata(filteredEntries)).build();
 
         // The format was kept pending in processMoovAtom either because it was waiting for chapter
-        // metadata, or because it is MPEG audio (which needs to wait for the first sample to
+        // metadata, or because it is MPEG or DTS audio (which needs to wait for the first sample to
         // determine the exact MIME type). We have now applied the chapter metadata, so we can
-        // output the format, unless it is also MPEG audio.
-        if (Objects.equals(updatedFormat.sampleMimeType, MimeTypes.AUDIO_MPEG)) {
+        // output the format, unless it is also MPEG or DTS audio.
+        if (Objects.equals(updatedFormat.sampleMimeType, MimeTypes.AUDIO_MPEG)
+            || DtsUtil.isDtsBaseAudioMimeType(updatedFormat.sampleMimeType)) {
           track.pendingFormat = updatedFormat;
         } else {
           track.trackOutput.format(updatedFormat);
@@ -1131,6 +1167,10 @@ public final class Mp4Extractor implements Extractor {
    * with the next logical sample (based on sample time) exceeds {@link
    * #MAXIMUM_READ_AHEAD_BYTES_STREAM}. If this is the case, we continue with this sample even
    * though it may require a source reload.
+   *
+   * <p>As an exception, dependent metadata tracks are prioritized over the aforementioned logic if
+   * their timestamp is behind or equal to the primary track (e.g., video). This ensures they can be
+   * extracted before the frames they apply to.
    */
   private int getTrackIndexOfNextReadSample(long inputPosition) {
     long preferredSkipAmount = Long.MAX_VALUE;
@@ -1140,11 +1180,26 @@ public final class Mp4Extractor implements Extractor {
     long minAccumulatedBytes = Long.MAX_VALUE;
     boolean minAccumulatedBytesRequiresReload = true;
     int minAccumulatedBytesTrackIndex = C.INDEX_UNSET;
+
+    long minVideoTimestampUs = Long.MAX_VALUE;
+    long minIt35TimestampUs = Long.MAX_VALUE;
+    int minIt35TrackIndex = C.INDEX_UNSET;
+
     for (int trackIndex = 0; trackIndex < tracks.length; trackIndex++) {
       Mp4Track track = tracks[trackIndex];
       int sampleIndex = track.sampleIndex;
       if (sampleIndex == track.sampleTable.sampleCount) {
         continue;
+      }
+
+      long sampleTimestampUs = track.sampleTable.timestampsUs[sampleIndex];
+      if (track.isVideo) {
+        minVideoTimestampUs = Math.min(minVideoTimestampUs, sampleTimestampUs);
+      } else if (track.isItutT35) {
+        if (sampleTimestampUs < minIt35TimestampUs) {
+          minIt35TimestampUs = sampleTimestampUs;
+          minIt35TrackIndex = trackIndex;
+        }
       }
       long sampleOffset = track.sampleTable.offsets[sampleIndex];
       long sampleAccumulatedBytes = checkNotNull(accumulatedSampleSizes)[trackIndex][sampleIndex];
@@ -1163,6 +1218,12 @@ public final class Mp4Extractor implements Extractor {
         minAccumulatedBytesTrackIndex = trackIndex;
       }
     }
+    if (minVideoTimestampUs != Long.MAX_VALUE
+        && minIt35TrackIndex != C.INDEX_UNSET
+        && minIt35TimestampUs <= minVideoTimestampUs) {
+      return minIt35TrackIndex;
+    }
+
     return minAccumulatedBytes == Long.MAX_VALUE
             || !minAccumulatedBytesRequiresReload
             || preferredAccumulatedBytes < minAccumulatedBytes + MAXIMUM_READ_AHEAD_BYTES_STREAM
@@ -1200,7 +1261,9 @@ public final class Mp4Extractor implements Extractor {
     if (Objects.equals(format.sampleMimeType, MimeTypes.VIDEO_H265)) {
       return (flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265) != 0;
     }
-    return false;
+    // Do not flag gate APV sample dependency parsing - prior experiments with H.264 and H.265
+    // were positive, and the defaults have been updated.
+    return Objects.equals(format.sampleMimeType, MimeTypes.VIDEO_APV);
   }
 
   /**
@@ -1355,6 +1418,8 @@ public final class Mp4Extractor implements Extractor {
     public final TrackSampleTable sampleTable;
     public final TrackOutput trackOutput;
     @Nullable public final TrueHdSampleRechunker trueHdSampleRechunker;
+    private final boolean isVideo;
+    private final boolean isItutT35;
 
     public int sampleIndex;
 
@@ -1362,12 +1427,14 @@ public final class Mp4Extractor implements Extractor {
      * A {@link Format} that needs to be passed to {@link #trackOutput}, after being possibly
      * modified based on sample data, before {@link TrackOutput#sampleMetadata} is called.
      */
-    @Nullable public Format pendingFormat;
+    @Nullable private Format pendingFormat;
 
     public Mp4Track(Track track, TrackSampleTable sampleTable, TrackOutput trackOutput) {
       this.track = track;
       this.sampleTable = sampleTable;
       this.trackOutput = trackOutput;
+      this.isVideo = track.type == C.TRACK_TYPE_VIDEO;
+      this.isItutT35 = Objects.equals(track.format.sampleMimeType, MimeTypes.APPLICATION_ITUT_T35);
       trueHdSampleRechunker =
           MimeTypes.AUDIO_TRUEHD.equals(track.format.sampleMimeType)
               ? new TrueHdSampleRechunker()
