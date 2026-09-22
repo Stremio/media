@@ -1,6 +1,6 @@
 [versions]
-releaseVersion = "1.11.1"
-releaseVersionCode = "1011001300"
+releaseVersion = "1.11.1-stremio01"
+releaseVersionCode = "1011001401"
 # SDK
 compileSdkVersion = "36"
 appTargetSdkVersion = "34"
